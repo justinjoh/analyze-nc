@@ -1,11 +1,62 @@
-import numpy as np
 from scipy.io import netcdf
-from scipy.stats import expon
 from matplotlib.pyplot import *
+import numpy as np
+from numpy import *
 import os
 
 
-# Read nc file (this function was written by Chase Goddard)
+without_sample_foldername = "without_sample"
+with_sample_foldername = "with_sample"
+
+numBins = 2048
+maxEnergy = 70000
+energyBinRatio = float(maxEnergy)/float(numBins) # number of eV per bin
+
+# start and end of fluorescence counting region
+fluo_start = 7600
+fluo_end = 8200
+
+# Read in cross-section data. Do this for all metals.
+metals_dict = {"Al":"", "Ti":"", "Fe":"", "Ni":"", "Cu":"", "Zr":"", "Ag":""}
+for key in metals_dict:
+    temp_csv = np.genfromtxt(str(key) + "_data.csv", delimiter=",")
+    sub_dict = {"energies_eV": "", "photo": "", "total": "", "kshell":"", "rhoNum" : "", "rhoMass" :"", "coef_kshell":"", "thickness":""}
+
+    sub_dict["energies_eV"] = temp_csv[:, 0] * 1000 # convert from keV to eV, for convenience
+    sub_dict["photo"] = temp_csv[:, 3]
+    sub_dict["total"] = temp_csv[:, 5]
+    sub_dict["kshell"] = temp_csv[:, 6]
+
+    metals_dict[key] = sub_dict
+# So, that loop takes care of what we need from the NIST data tables. Add in the rest manually.
+metals_dict["Al"]["rhoNum"] = "" # TODO need to fill in all of these, may take quite a while.
+
+metals_dict["Cu"]["rhoNum"] = 6.51*10**22  # copper number density (atoms*cm^-3)
+metals_dict["Cu"]["rhoMass"] = 8.96  # copper mass density (grams*cm^-3)
+metals_dict["Cu"]["coef_kshell"] = 52.6  # x-ray absorption of characteristic fluorescence
+metals_dict["Cu"]["thickness"] = .000008  # metal thickness (centimeters). for Jan. test, was .0254 cm
+metals_dict["Cu"]["thickness"] = .0254
+print("Running with copper thickness " + str(metals_dict["Cu"]["thickness"]))
+
+
+
+
+
+
+csv = np.genfromtxt('Cu_data.csv', delimiter=",")
+energies_eV = csv[:, 0] * 1000  # convert from keV to eV, for convenience
+photo = csv[:, 3]
+total = csv[:, 5]
+kshell = csv[:, 6]
+
+# other numerical constants
+rhoNum = 6.51*10**22  # copper number density (atoms*cm^-3)
+rhoMass = 8.96  # copper mass density (grams*cm^-3)
+coef_kshell = 52.6  # mu/rho for photoabsorption of 8keV, do not need to interpolate w/ NIST values
+copper_thickness = .0254  # copper thickness (centimeters)
+
+
+# Read in an nc file (this function was written by Chase Goddard)
 def read_netcdf(directory, f_name):
     """Read in a netcdf (.nc) file from disk and return the data contained
     in the form of a numpy structured array.
@@ -25,14 +76,14 @@ def read_netcdf(directory, f_name):
     # Get number of events. 2^16 scales word 67 according to xMAP file format
     # word 66 and 67 are the header words that contain the number of events
     num_events = data[66].astype('int32') + \
-                 (2 ** 16) * (data[67].astype('int32'))
+        (2 ** 16) * (data[67].astype('int32'))
     time_constant = 20e-9  # conversion factor from xMAP time units to seconds
 
     # size of header, in words
     offset = np.array([256]).astype('int32')
 
     # set up vectors to store data
-    E = np.zeros(num_events)
+    energies = np.zeros(num_events)
     channel = np.zeros(num_events)
     time = np.zeros(num_events, dtype='float64')
 
@@ -51,102 +102,292 @@ def read_netcdf(directory, f_name):
         # extract channel bits (13-15 of word 1)
         channel[i] = np.bitwise_and(np.right_shift(word1, 13), 3)
         # extract energy bits (0-12 of word 1)
-        E[i] = np.bitwise_and(word1, 0x1fff)
+        energies[i] = np.bitwise_and(word1, 0x1fff)
         # extract time bits
         time[i] = (word3 * (2 ** 16) + word2) * time_constant
 
     # package data into table format
-    return np.array(list(zip(time, E, channel)),
+    return np.array(list(zip(time, energies, channel)),
                     dtype={'names':  ['time', 'E', 'channel'],
                            'formats': ['float64', 'int32', 'int32']})
 
-def count_fluo(spectrum, ROI_start, ROI_end):
-    # return number of counts in bins between ROI_start and ROI_end.
-    # Be sure that are using units correctly, i.e. detector bins vs. electron volts
-    count = 0
-    for i in range(0, len(spectrum)):
-        num = spectrum[i]
-        if (num <= ROI_end and num >= ROI_start):
-            count += 1
+
+def list_to_spectrum(some_phot_list):
+    """Takes input of photon list (i.e. result of read_netcdf) and returns a <numBins>x1 numpy array.
+    Each of those <numBins. entries stores the number of photons in that energy bin."""
+
+    new_spectrum = np.zeros((numBins, 1))  # initialize spectrum as list of <numBins> zeros
+    # then iterate through photon list
+    num_photons = len(some_phot_list)
+    for i in range(0, num_photons-1):
+        this_bin = int(some_phot_list[i])
+        this_index = min(int(this_bin), numBins-1)
+        new_spectrum[this_index] += 1  # increment the number of photons in the corresponding bin by 1
+
+    return new_spectrum
+
+
+def add_spectra_from_folder(folder_name):
+    """Return a spectrum format consisting of all folders in folder <foldername>
+    Folder  <foldername> should be in the same folder as this python file."""
+
+    this_dir = os.getcwd() + "/" + folder_name + "/"
+    added_spectra = np.zeros((2048, 1))
+
+    for filename in os.listdir(this_dir):
+        if filename.endswith(".nc"):
+            temp_phot_list = read_netcdf(this_dir, filename)['E']  # read in this .nc as photon list
+            single_spectrum = list_to_spectrum(temp_phot_list)  # put it in spectrum form
+            added_spectra = single_spectrum + added_spectra  # add to total spectrum
+
+    return added_spectra
+
+
+def count_fluo(some_spectrum):
+    """"Return number of photons in some_spectrum with energy (eV) between ROI_start and ROI_end."""
+    assert numBins == len(some_spectrum), "This spectrum does not have <numBins> entries; ensure that" \
+        "the photon list from the netcdf file is properly sorted into spectrum format."
+
+    count = 0  # running count of photons in desired range
+    bin_start = int(fluo_start/energyBinRatio)
+    bin_end = int(fluo_end/energyBinRatio)
+
+    for i in range(bin_start, bin_end):
+        count += int(some_spectrum[i])
     return count
-    #for i in range(0, len(spectrum)):
-#
-#        num = spectrum[i]
-#        try:
-#            num = np.int64(num)
-#        except:
-#            pass
-#        if (num <= ROI_end & num >= ROI_start):
-#            print num
-#            count += 1
-#    return count
 
 
-def subtract(spectrum, toSubtract):
-    # subtract toSubtract from spectrum
-    numChannels = 2048
-    new = np.zeros(numChannels)
-    for i in range(0, numChannels):
-        new[i] = spectrum[i]-toSubtract[i]
-    return new
-
-
-def convert_to_eV(spectrum, numChannels, maxEnergy):
-    # return spectrum but in units of energy, not channel
-    lenSpectrum = len(spectrum)
-    newSpectrum = np.zeros(lenSpectrum)
-    factor = maxEnergy/numChannels
-    for i in range(0, lenSpectrum):
-        newSpectrum[i] = spectrum[i]*factor
-    return newSpectrum
-
-
-def plot_spectrum(spectrum, bins, range):
-    # show a Counts vs. Energy (eV) histogram
-    hist(spectrum, bins, range)
-    xlabel('Energy (eV)')
-    ylabel('Counts')
+def plot_spectrum(some_spectrum):
+    assert len(some_spectrum) == numBins, "length of spectrum is not <numBins>"
+    bar(range(0, numBins), height=some_spectrum)
     show()
 
+
+def stdev_from_reposition():
+    """Implement later"""
+    pass
+
+
+def plot_spectrum_with_bars():
+    """Implement later"""
+    pass
+
+
+def fluorate_from_bin(this_energy):
+    """Return \"fluorate\" as such: fluorate*(number of photons in bin) = total number of fluorescence photons
+    expected to be created by the photons in this bin incident on copper sample"""
+
+    # interpolation process:
+    i = 0
+    while energies_eV[i] < this_energy:
+        i += 1
+    # Now have overshoto with i, so energieseV[i-1] and energieseV[i] are on either side
+
+    # begin linear interpolation
+    slope = (this_energy-energies_eV[i-1])/(energies_eV[i]-energies_eV[i-1])
+
+    presig_fl = kshell[i-1] + (kshell[i]-kshell[i-1]) * slope
+    coef_energy = photo[i-1] + (photo[i]-photo[i-1])*slope
+
+    # end linear interpolation
+
+    # begin power law interpolation
+
+    E1 = energies_eV[i-1]
+
+    E2 = energies_eV[i]
+    # print(math.log(E2/E1))
+    # print(kshell[i-1])
+#    print(kshell[i]/kshell[i-1])
+    # presig_fl:
+    if kshell[i-1] == 0:
+        presig_fl = 0
+    else:
+        b1 = math.log(kshell[i]/kshell[i-1])/math.log(E2/E1)
+        presig_fl = kshell[i-1]*(this_energy/E1)**b1
+
+    # coef_energy:
+    if photo[i-1] == 0:
+        coef_energy = 0
+    else:
+        b2 = math.log(photo[i]/photo[i-1])/math.log(E2/E1)
+        coef_energy = photo[i-1]*(this_energy/E1)**b2
+
+    # end power law interpolation
+
+    sig_fl = presig_fl*1.05521*100*10**(-24)  # unit conversion
+    # ust for convenience/legibility, define a, b, z as following:
+    a = sig_fl*rhoNum
+    b = coef_kshell * rhoMass
+    z = -coef_energy*rhoMass
+
+    factor = (a/(z+b))*(math.exp(z * copper_thickness) - math.exp(-b * copper_thickness))
+    print("factor non-flex: " + str(factor))
+    return factor  # remember, multiply this by number of photons in the bin (back in copper_fluo_rate)
+
+
+def fluorate_from_bin_flex(this_energy, metal):
+    """Return \"fluorate\" as such: fluorate*(number of photons in bin) = total number of fluorescence photons
+        expected to be created by the photons in this bin incident on metal sample"""
+
+    # For convenience, since working with same metal throughout function:
+    this_energieseV = metals_dict[metal]["energies_eV"]
+    this_kshell = metals_dict[metal]["kshell"]
+    this_photo = metals_dict[metal]["photo"]
+    this_rhoNum = metals_dict[metal]["rhoNum"]
+    this_rhoMass = metals_dict[metal]["rhoMass"]
+    this_coef_kshell = metals_dict[metal]["coef_kshell"]
+    this_thickness = metals_dict[metal]["thickness"]
+    # start of power law interpolation process
+    i = 0
+    while this_energieseV[i] < this_energy:
+        i += 1
+    # Now have overshot with i, so energieseV[i-1] and energieseV[i] are on either side.
+
+    E1 = this_energieseV[i-1]
+    E2 = this_energieseV[i]
+    if this_kshell[i-1] == 0:
+        presig_fl = 0
+    else:
+        b1 = math.log(this_kshell[i] / this_kshell[i - 1]) / math.log(E2 / E1)
+        presig_fl = this_kshell[i - 1] * (this_energy / E1) ** b1
+
+    # get coef_energy:
+    if this_photo[i-1] == 0:
+        coef_energy = 0
+    else:
+        b2 = math.log(this_photo[i]/this_photo[i-1])/math.log(E2/E1)
+        coef_energy = this_photo[i-1]*(this_energy/E1)**b2
+    # end of power law interpolation process
+    sig_fl = presig_fl * 1.05521 * 100 * 10 ** (-24)  # unit conversion
+    a = sig_fl * this_rhoNum
+    b = this_coef_kshell * this_rhoMass
+    z = -coef_energy * this_rhoMass
+
+    factor = (a / (z + b)) * (math.exp(z * this_thickness) - math.exp(-b * this_thickness))
+
+    return factor  # remember, multiply this by number of photons in the bin
+
+
+def copper_fluo_rate(some_spectrum):
+    """Returns the total number of 8keV photons expected from a spectrum incident on a copper sample.
+    Does this by calling method fluorate_from_bin for each bin.
+    continue writing appropriate method spec here"""
+
+    # TODO need to add parameter for which detector (and incorporate Arthur's solid angle calculations)
+
+    total_expected_8kev = 0  #
+
+    for i in range(0, numBins):
+        this_energy = energyBinRatio*(i+1)  # energy corresponding to this bin
+        # find total absorption coefficient here with linear interpolation?
+        # TODO ensure that geometric factors are in assignment to "additional"
+        # .25 is from solid angle calculation (this is in physical lab book, based on
+        #   information from manufacturer)
+        additional = .146*fluorate_from_bin(this_energy) * some_spectrum[i]
+        total_expected_8kev += additional
+    return total_expected_8kev
+
+
+def fluo_rate_metal(some_spectrum, metal):
+    """Returns the total number of k-shell fluorescence photons expected from a spectrum incident on a metal sample.
+    Does this by calling method fluorate_from_bin for each bin."""
+
+    total_expected_kshell = 0
+
+    for i in range(0, numBins):
+        this_energy = energyBinRatio*(i+1)  # energy corresponding to this bin
+        # TODO this is where to put in solid angle factor
+        SA_factor = 0  # change this
+        additional = SA_factor*fluorate_from_bin_flex(this_energy, metal) * some_spectrum[i]
+        total_expected_kshell += additional
+    return total_expected_kshell
+
+
+def print3(num):
+    print "    {:0.3f}".format(num)
+
 if __name__ == '__main__':
-    # commandline use: $ python analyze_nc.py filename.nc
 
-    numChannels = 2048
-    maxEnergy = 70000
+    if len(sys.argv) == 3 and sys.argv[1].lower() == "single":
+        """Single-file inspection mode: histogram, print total number of photons.
+        Example cmdline usage:
+        $ python analyze_nc.py single list_00129.nc """
 
-    try:
-        data = read_netcdf("", sys.argv[1])
-    except:
-        data = read_netcdf("", sys.argv[1] + ".nc")
-    energies = data['E']
+        print("Single-file inspection of \"" + str(sys.argv[2]) + "\"")
 
-    energieseV = convert_to_eV(energies, numChannels, maxEnergy) # convert the energies to electron volts for easier visualization
+        phot_list = read_netcdf("", sys.argv[2])['E']
+        spectrum = list_to_spectrum(phot_list)
 
-    hist(energieseV, bins=numChannels,range=(0,maxEnergy))
+        plot_spectrum(spectrum)
+        total_photons = len(phot_list)
+        print("Number of photons in this .nc file: " + str(total_photons))
+        total_fluo = count_fluo(spectrum)
+        print("Fluo counts in this .nc file: " + str(total_fluo))
+        print("Fluo divided by total: " + str(float(total_fluo)/float(total_photons)))
 
-    ROI_start = 0
-    ROI_end = 99999
-    print("Counts between " + str(ROI_start) + " and " + str(ROI_end) + ": " + str(count_fluo(energieseV, ROI_start, ROI_end)))
+    elif len(sys.argv) == 2 and sys.argv[1].lower() == "repositioningg":
+        print("Repositioning analysis not yet implemented")
+        pass
 
-    # plot_spectrum(energieseV, bins=numChannels, range=(0, maxEnergy))
+    elif len(sys.argv) == 1:
+        """Multi-file inspection mode: for analyzing spectrum, fluorescence counts etc.
+        Example cmdline usage:
+        $ python analyze_nc.py """
 
-    # for each Am + Al spectrum, subtract detector alone and add --> corrected1
-    corrected1 = np.zeros(numChannels)
+        print("Running multi-file inspection mode")
 
-    for filename in os.listdir(os.getcwd() + "/AmAl/"):
-    # Use this to add different spectra for now. Eventually want to use for creating "weighted averages"
-        dir = os.getcwd() + "/AmAl/"
-        totalPhotons = 0 # total number of photons
-        allAmAl = np.zeros(0)
-        if filename.endswith(".nc"):
-            energies = read_netcdf(dir,  filename)['E']
-            numPhotons = len(energies)
-            # for photon in file, add to allAmAl bin
-            for i in range(0, numPhotons):
-                np.append(allAmAl, energies[i])
-    plot_spectrum(allAmAl, bins=numChannels, range=(0, maxEnergy))
+        # Step 0: Add up background data and subtract (scaled properly, of course)
+        # TODO do background subtraction here
 
-    # for the corrected1, calculate k-alpha fluorescence rate (np array) --> corrected2
+        # Step 1: for each without-sample spectrum, add together
+        # TODO subtract scaled background also. Not done right now because difference is small, but must eventually
+        without_sample_spectrum = add_spectra_from_folder(without_sample_foldername)
 
-    # for each Am + Al + Cu spectrum
-    # subtract corresponding corrected2
+        # Step 2: calculate expected k-alpha fluo. rate (looks at each energy bin, because different incident energies
+        #   interact differently with the copper sample
+
+        expected_fluo = copper_fluo_rate(without_sample_spectrum)
+        # divide by total number of photons to "normalize" for comparison
+
+        norm_expected_fluo = float(expected_fluo)/float(len(without_sample_spectrum))
+        print("normalized expected fluo: ")
+        print3(norm_expected_fluo)
+
+        # Step 3: add up with-sample spectrum count, and count_flu_photons (normalize)
+        with_sample_spectrum = add_spectra_from_folder(with_sample_foldername)
+
+        try:
+            # Count all fluorescence photons from with-sample files
+            observed_fluo = count_fluo(with_sample_spectrum)
+            print("observed fluorescence photons: \n    " + str(observed_fluo))
+
+            # Count the number of fluorescence-range photons seen WITHOUT the Cu target
+            # "normalize" for comparison
+            background_observed_fluo = count_fluo(without_sample_spectrum)
+            normalized_background_observed_fluo = float(background_observed_fluo)/float(len(without_sample_spectrum))
+            print("normalized background observed fluo: ")
+            print3(normalized_background_observed_fluo)
+
+            # Divide by total number of photons to "normalize" for comparison
+            normalized_observed_fluo = float(observed_fluo)/float(len(with_sample_spectrum))
+            print("normalized observed fluo: ")
+            print3(normalized_observed_fluo)
+            final_normalized_fluo = normalized_observed_fluo - normalized_background_observed_fluo
+            print("subtracted normalized observed fluo (final): ")
+            print3(final_normalized_fluo)
+            percent_error = 100*float(final_normalized_fluo - norm_expected_fluo)/float(norm_expected_fluo)
+            print("percent error: ")
+            print3(percent_error)
+
+            plot_spectrum(with_sample_spectrum)
+
+        except ZeroDivisionError:
+            print("The folder \"" + str(with_sample_foldername) + "\" appears to be empty")
+
+    elif len(sys.argv) == 3 and sys.argv[1].lower() == "calc":
+        run_energy = int(sys.argv[2])
+        # run_thickness = int(sys.argv[3])
+        print(str(run_energy) + " eV")
+        print(fluorate_from_bin_flex(run_energy, "Cu"))
+
