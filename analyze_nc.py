@@ -34,14 +34,9 @@ metals_dict["Al"]["rhoNum"] = "" # TODO need to fill in all of these, may take q
 metals_dict["Cu"]["rhoNum"] = 6.51*10**22  # copper number density (atoms*cm^-3)
 metals_dict["Cu"]["rhoMass"] = 8.96  # copper mass density (grams*cm^-3)
 metals_dict["Cu"]["coef_kshell"] = 52.6  # x-ray absorption of characteristic fluorescence
-metals_dict["Cu"]["thickness"] = .000008  # metal thickness (centimeters). for Jan. test, was .0254 cm
-metals_dict["Cu"]["thickness"] = .0254
-print("Running with copper thickness " + str(metals_dict["Cu"]["thickness"]))
-
-
-
-
-
+metals_dict["Cu"]["thickness"] = 40*10**(-7)  # metal thickness (centimeters). for Jan. test, was .0254 cm
+# metals_dict["Cu"]["thickness"] = .0254
+print("Running (something?) with copper thickness " + str(metals_dict["Cu"]["thickness"]))
 
 csv = np.genfromtxt('Cu_data.csv', delimiter=",")
 energies_eV = csv[:, 0] * 1000  # convert from keV to eV, for convenience
@@ -226,7 +221,7 @@ def fluorate_from_bin(this_energy):
     return factor  # remember, multiply this by number of photons in the bin (back in copper_fluo_rate)
 
 
-def fluorate_from_bin_flex(this_energy, metal):
+def fluorate_from_bin_flex(this_energy, metal, *thickness):
     """Return \"fluorate\" as such: fluorate*(number of photons in bin) = total number of fluorescence photons
         expected to be created by the photons in this bin incident on metal sample"""
 
@@ -237,7 +232,11 @@ def fluorate_from_bin_flex(this_energy, metal):
     this_rhoNum = metals_dict[metal]["rhoNum"]
     this_rhoMass = metals_dict[metal]["rhoMass"]
     this_coef_kshell = metals_dict[metal]["coef_kshell"]
-    this_thickness = metals_dict[metal]["thickness"]
+    if type(thickness) == int:
+        this_thickness = thickness
+    else:
+        this_thickness = metals_dict[metal]["thickness"]
+
     # start of power law interpolation process
     i = 0
     while this_energieseV[i] < this_energy:
@@ -326,7 +325,7 @@ if __name__ == '__main__':
         print("Fluo counts in this .nc file: " + str(total_fluo))
         print("Fluo divided by total: " + str(float(total_fluo)/float(total_photons)))
 
-    elif len(sys.argv) == 2 and sys.argv[1].lower() == "repositioningg":
+    elif len(sys.argv) == 2 and sys.argv[1].lower() == "repositioning":
         print("Repositioning analysis not yet implemented")
         pass
 
@@ -389,5 +388,49 @@ if __name__ == '__main__':
         run_energy = int(sys.argv[2])
         # run_thickness = int(sys.argv[3])
         print(str(run_energy) + " eV")
-        print(fluorate_from_bin_flex(run_energy, "Cu"))
+        prefactor = (fluorate_from_bin_flex(run_energy, "Cu"))
+        factor1 = prefactor * .00875  # .11/4pi
+        factor4 = prefactor * .02976  # .374/4pi
 
+        print factor1
+        print factor4
+
+    elif len(sys.argv) == 2 and sys.argv[1].lower() == "test_equation":
+
+        for i in (.1, 1, 16):  # thicknesses in microns
+            t = i*10**(-4)  # microns to cm
+            metals_dict["Cu"]["thickness"] = t
+            mat_x = np.zeros((20, 1))
+            mat_y = np.zeros((20, 1))
+            counter = 0
+            for j in range(0, 20000, 1000):  # over steps of energies
+                mat_x[counter] = j
+                r = fluorate_from_bin_flex(j, "Cu", t)
+                mat_y[counter] = r
+                counter += 1
+            print mat_y
+            plot(mat_x, mat_y, label=str("thickness " + str(t)))
+        legend()
+        xlabel("energy (eV)")
+        ylabel("fluo factor")
+        show()
+
+        for energy in (10000, 20000, 30000, 40000, 50000):
+
+            mat_x1 = np.zeros((8000, 1))
+            mat_y1 = np.zeros((8000, 1))
+            counter1 = 0
+            for i in range(0, 80000, 10):  # thickness, in nm
+                t = i*10**(-7)  # convert nm to cm thickness
+                metals_dict["Cu"]["thickness"] = t
+                mat_x1[counter1] = i
+                r = fluorate_from_bin_flex(energy, "Cu")  # at some set energy
+                mat_y1[counter1] = r
+                counter1 += 1
+            plot(mat_x1, mat_y1, label=str(energy) + " eV")
+        legend()
+        xlabel("thickness (nm)")
+        ylabel("fluo factor")
+        # show()
+
+        pass
