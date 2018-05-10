@@ -35,8 +35,7 @@ metals_dict["Cu"]["rhoNum"] = 6.51*10**22  # copper number density (atoms*cm^-3)
 metals_dict["Cu"]["rhoMass"] = 8.96  # copper mass density (grams*cm^-3)
 metals_dict["Cu"]["coef_kshell"] = 52.6  # x-ray absorption of characteristic fluorescence
 metals_dict["Cu"]["thickness"] = 40*10**(-7)  # metal thickness (centimeters). for Jan. test, was .0254 cm
-# metals_dict["Cu"]["thickness"] = .0254
-print("Running (something?) with copper thickness " + str(metals_dict["Cu"]["thickness"]))
+
 
 csv = np.genfromtxt('Cu_data.csv', delimiter=",")
 energies_eV = csv[:, 0] * 1000  # convert from keV to eV, for convenience
@@ -168,6 +167,64 @@ def plot_spectrum_with_bars():
     pass
 
 
+def beamtime_expected_fluo(thickness_nm, this_energy, incident_flux, runtime, detector_type):
+    """
+    thickness_nm: in nm
+    this_energy: in eV
+    incident_flux: in photons/second
+    runtime: in seconds
+
+    Return number of expected fluorescence photons
+    Uses simplified formula, for low self-absorption of sample:
+    factor = (sig_fl)(number density)(sample thickness)
+    """
+
+    assert int(detector_type) == 1 or int(detector_type) == 4, "Must type 1 or 4 for 1 or 4 element detector"
+
+    print("Thickness in nanometers: " + thickness_nm)
+    thickness_nm = int(thickness_nm)
+    print("Energy of incident beam in eV: " + this_energy)
+    this_energy = int(this_energy)
+    print("Incident flux in photons/second: " + incident_flux)
+    incident_flux = int(incident_flux)
+    print("Runtime in seconds: " + str(runtime))
+    runtime = int(runtime)
+    # interpolation process:
+
+    i = 0
+    while int(energies_eV[i]) < int(this_energy):
+
+        i += 1
+
+    E1 = energies_eV[i-1]
+    E2 = energies_eV[i]
+    print E1
+    print E2
+    if kshell[i-1] == 0:
+        presig_fl = 0
+    else:
+        b1 = math.log(kshell[i]/kshell[i-1])/math.log(E2/E1)
+        presig_fl = float(kshell[i-1])*(this_energy/E1)**b1
+
+    # presig_fl needs to be converted to cross-section. convert to barns/atom to cm^2/atom
+    sig_fl = presig_fl * 1.055*10**2 * 10**(-24)  # to barns, then to cm^2
+    print ("fluorescence cross section cm^2/atom: " + str(sig_fl))
+
+    thickness_cm = thickness_nm * 10**(-7)
+
+    if int(detector_type) == 1:
+        SA = .0084
+    elif int(detector_type) == 4:
+        SA = 0
+        print("need to add solid angle for 4-element")
+    expect_fluo = SA * .44/(4*3.141592) * sig_fl * rhoNum * thickness_cm * incident_flux * runtime
+    print("Expected fluo counts: " + str(expect_fluo))
+    other_fluo =  SA * .44/(4*3.141592) * (sig_fl*rhoNum/(presig_fl*rhoMass))*(1-math.exp(-presig_fl*rhoMass*thickness_cm)) * incident_flux * runtime
+    print other_fluo
+    return expect_fluo
+
+
+
 def fluorate_from_bin(this_energy):
     """Return \"fluorate\" as such: fluorate*(number of photons in bin) = total number of fluorescence photons
     expected to be created by the photons in this bin incident on copper sample"""
@@ -217,7 +274,7 @@ def fluorate_from_bin(this_energy):
     z = -coef_energy*rhoMass
 
     factor = (a/(z+b))*(math.exp(z * copper_thickness) - math.exp(-b * copper_thickness))
-    print("factor non-flex: " + str(factor))
+    # print("factor non-flex: " + str(factor))
     return factor  # remember, multiply this by number of photons in the bin (back in copper_fluo_rate)
 
 
@@ -329,28 +386,30 @@ if __name__ == '__main__':
         print("Repositioning analysis not yet implemented")
         pass
 
-    elif len(sys.argv) == 1:
+    elif len(sys.argv) == 2 and type(sys.argv[1] == int):
         """Multi-file inspection mode: for analyzing spectrum, fluorescence counts etc.
         Example cmdline usage:
         $ python analyze_nc.py """
 
         print("Running multi-file inspection mode")
 
-        # Step 0: Add up background data and subtract (scaled properly, of course)
-        # TODO do background subtraction here
+        in_nm = float(sys.argv[1])
+
+        copper_thickness = float(in_nm)*10**(-7)
+        metals_dict["Cu"]["thickness"] = float(in_nm)*10 ** (-7)
+
+        print("Running with copper thickness " + str(in_nm) + " nanometers")
 
         # Step 1: for each without-sample spectrum, add together
-        # TODO subtract scaled background also. Not done right now because difference is small, but must eventually
         without_sample_spectrum = add_spectra_from_folder(without_sample_foldername)
 
         # Step 2: calculate expected k-alpha fluo. rate (looks at each energy bin, because different incident energies
         #   interact differently with the copper sample
-
         expected_fluo = copper_fluo_rate(without_sample_spectrum)
         # divide by total number of photons to "normalize" for comparison
 
         norm_expected_fluo = float(expected_fluo)/float(len(without_sample_spectrum))
-        print("normalized expected fluo: ")
+        print("Normalized expected fluorescence: ")
         print3(norm_expected_fluo)
 
         # Step 3: add up with-sample spectrum count, and count_flu_photons (normalize)
@@ -359,13 +418,13 @@ if __name__ == '__main__':
         try:
             # Count all fluorescence photons from with-sample files
             observed_fluo = count_fluo(with_sample_spectrum)
-            print("observed fluorescence photons: \n    " + str(observed_fluo))
+            print("Observed fluorescence photons: \n    " + str(observed_fluo))
 
             # Count the number of fluorescence-range photons seen WITHOUT the Cu target
             # "normalize" for comparison
             background_observed_fluo = count_fluo(without_sample_spectrum)
             normalized_background_observed_fluo = float(background_observed_fluo)/float(len(without_sample_spectrum))
-            print("normalized background observed fluo: ")
+            print("Normalized background observed fluo: ")
             print3(normalized_background_observed_fluo)
 
             # Divide by total number of photons to "normalize" for comparison
@@ -373,11 +432,16 @@ if __name__ == '__main__':
             print("normalized observed fluo: ")
             print3(normalized_observed_fluo)
             final_normalized_fluo = normalized_observed_fluo - normalized_background_observed_fluo
-            print("subtracted normalized observed fluo (final): ")
+            print("Subtracted normalized observed fluo (final): ")
             print3(final_normalized_fluo)
             percent_error = 100*float(final_normalized_fluo - norm_expected_fluo)/float(norm_expected_fluo)
             print("percent error: ")
             print3(percent_error)
+
+            if(percent_error < 0):
+                print ("Seeing fewer fluorescence photons than expected")
+            elif percent_error > 0:
+                print ("Seeing more fluorescence photons than expected")
 
             plot_spectrum(with_sample_spectrum)
 
@@ -434,3 +498,8 @@ if __name__ == '__main__':
         # show()
 
         pass
+
+    elif len(sys.argv) == 6:
+        #
+        a = beamtime_expected_fluo(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
+        #beamtime_expected_fluo(thickness_nm, this_energy, incident_flux, runtime)
